@@ -1,29 +1,70 @@
 #!/usr/bin/env node
 /**
- * Codex Desktop 中文语言包安装脚本
- * 用法: node install.js [/Applications/Codex.app]
- * 需要: node >= 18, @electron/asar (会自动安装)
+ * Codex Desktop 中文语言包安装脚本（跨平台）
+ * 支持: macOS / Windows / Linux
+ *
+ * 用法:
+ *   node install.js [/path/to/Codex.exe_or_app]
+ *
+ * Windows 默认路径: %LOCALAPPDATA%\Programs\Codex\resources\app.asar
+ * macOS 默认路径:   /Applications/Codex.app/Contents/Resources/app.asar
  */
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { execSync } = require('child_process');
-const { spawnSync } = require('child_process');
+
+// ====== 平台检测 ======
+const PLATFORM = os.platform(); // 'darwin' | 'win32' | 'linux'
+const IS_MAC = PLATFORM === 'darwin';
+const IS_WIN = PLATFORM === 'win32';
+const IS_LINUX = PLATFORM === 'linux';
 
 // ====== 配置 ======
-const CODEX_APP_DEFAULT = '/Applications/Codex.app';
+function getDefaultCodexPath() {
+  if (IS_MAC) {
+    return '/Applications/Codex.app';
+  }
+  if (IS_WIN) {
+    const localAppData = process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE, 'AppData', 'Local');
+    return path.join(localAppData, 'Programs', 'Codex');
+  }
+  // Linux: 常见安装位置
+  return '/opt/Codex' || path.join(process.env.HOME, '.local', 'share', 'Codex');
+}
 
-// ====== 工具函数 ======
+const CODEX_APP_DEFAULT = getDefaultCodexPath();
+
+// ====== 日志 ======
 function log(msg) { console.log(msg); }
 function step(n, msg) { log(`\n[${n}/8] ${msg}...`); }
 
 function run(cmd, opts = {}) {
+  const defaultShell = IS_WIN ? 'cmd.exe' : (IS_MAC ? '/bin/zsh' : '/bin/bash');
   try {
-    return execSync(cmd, { stdio: 'inherit', shell: '/bin/zsh', ...opts });
+    return execSync(cmd, { stdio: 'inherit', shell: defaultShell, ...opts });
   } catch (e) {
     if (opts.allowFail) return;
     log(`❌ 命令失败: ${cmd}`);
     log(e.message);
+    process.exit(1);
+  }
+}
+
+function sudoRun(cmd, opts = {}) {
+  if (IS_WIN) {
+    // Windows: 提示用户以管理员身份运行
+    log('⚠️  请右键「命令提示符」→「以管理员身份运行」，然后重新执行此脚本');
+    log('   或执行: runas /user:Administrator "node install.js"');
+    process.exit(1);
+  }
+  // macOS / Linux: 尝试 sudo
+  try {
+    return execSync(`sudo ${cmd}`, { stdio: 'inherit', shell: IS_MAC ? '/bin/zsh' : '/bin/bash', ...opts });
+  } catch (e) {
+    log(`❌ sudo 命令失败: ${cmd}`);
+    log('请手动执行: sudo node install.js');
     process.exit(1);
   }
 }
@@ -36,30 +77,68 @@ function writeFile(p, c) {
   fs.writeFileSync(p, c, 'utf8');
 }
 
-// 安全的全局替换：通过 split/join 实现，避免正则特殊字符问题
-function safeReplaceAll(content, search, replace) {
-  // 如果 search 是正则，直接用 replace
-  if (search instanceof RegExp) return content.replace(search, replace);
-  // 否则用 split/join 做全局替换
-  return content.split(search).join(replace);
+// ====== 获取 asar 路径 ======
+function getAsarPath(codexAppPath) {
+  if (IS_MAC) {
+    return path.join(codexAppPath, 'Contents/Resources/app.asar');
+  }
+  if (IS_WIN) {
+    return path.join(codexAppPath, 'resources', 'app.asar');
+  }
+  // Linux: 通常在 resources/
+  return path.join(codexAppPath, 'resources', 'app.asar');
+}
+
+// ====== 代码签名 ======
+function removeSignature(codexAppPath) {
+  if (IS_MAC) {
+    run(`codesign --remove-signature "${codexAppPath}"`, { allowFail: true });
+  } else if (IS_WIN) {
+    // Windows: 通常不需要移除签名，直接替换 app.asar 即可
+    // 如果有 signtool，可以尝试移除
+    log('⚠️  Windows 版：如需签名，请手动使用 signtool 移除签名');
+  }
+}
+
+function reSign(codexAppPath) {
+  if (IS_MAC) {
+    run(`codesign --force --deep --sign - "${codexAppPath}"`, { allowFail: true });
+    log('✅ macOS 代码签名已完成（临时签名）');
+  } else if (IS_WIN) {
+    log('⚠️  Windows 版：如需要，请手动使用 signtool 签名：');
+    log('   signtool sign /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 "Codex.exe"');
+  }
+}
+
+// ====== 工作目录 ======
+function getWorkDir() {
+  if (IS_WIN) {
+    return path.join(process.env.TEMP || 'C:\\Temp', `codex-i18n-${Date.now()}`);
+  }
+  return path.join('/tmp', `codex-i18n-${Date.now()}`);
 }
 
 // ====== 主流程 ======
 async function main() {
   const codexAppPath = process.argv[2] || CODEX_APP_DEFAULT;
-  const asarPath = path.join(codexAppPath, 'Contents/Resources/app.asar');
+  const asarPath = getAsarPath(codexAppPath);
 
-  log('🚀 Codex Desktop 中文语言包安装器');
+  const platformName = IS_MAC ? 'macOS' : (IS_WIN ? 'Windows' : 'Linux');
+  log(`🚀 Codex Desktop 中文语言包安装器 (${platformName})`);
   log(`📂 Codex 路径: ${codexAppPath}`);
+  log(`📦 asar 路径:  ${asarPath}`);
 
   if (!fs.existsSync(asarPath)) {
     log(`❌ 找不到 app.asar: ${asarPath}`);
     log('请确认 Codex Desktop 已安装，或通过参数指定路径：');
-    log('  node install.js /path/to/Codex.app');
+    log('  node install.js /path/to/Codex');
+    if (IS_WIN) {
+      log('  node install.js "C:\\Users\\你的用户名\\AppData\\Local\\Programs\\Codex"');
+    }
     process.exit(1);
   }
 
-  const workDir = path.join('/tmp', `codex-i18n-${Date.now()}`);
+  const workDir = getWorkDir();
   fs.mkdirSync(workDir, { recursive: true });
   log(`📁 工作目录: ${workDir}`);
 
@@ -107,11 +186,10 @@ async function main() {
       }
     }
 
-    // --- 3c. FR() 函数回退值 en-US -> zh-CN ---
+    // --- 3c. FR() 函数回退值 ---
     {
       const before = c;
-      c = c.replace(/(\|\")en-US(\"\|)/g, '$1zh-CN$2');
-      // 也处理 defaultLocale:"en-US"
+      c = c.replace(/(\|")en-US(\"\|)/g, '$1zh-CN$2');
       c = c.replace(/defaultLocale:"en-US"/g, 'defaultLocale:"zh-CN"');
       if (c !== before) count++;
     }
@@ -157,7 +235,6 @@ async function main() {
 
     // --- 3h. quit 加中文 label ---
     {
-      // 找 "A,{role:`quit`}" 模式 (A 是变量)
       const pattern = /(\w),\{role:`quit`\}/;
       const m = c.match(pattern);
       if (m) {
@@ -167,7 +244,7 @@ async function main() {
       }
     }
 
-    // --- 3i. 编辑菜单 submenu (替换 role:editMenu 为完整 submenu) ---
+    // --- 3i. 编辑菜单 submenu ---
     {
       const target = '{label:`编辑`,role:`editMenu`,id:t.kn.edit}';
       const replacement = '{label:`编辑`,id:t.kn.edit,submenu:[' +
@@ -200,10 +277,7 @@ async function main() {
       ['label:`Toggle Full Screen`', 'label:`切换全屏`'],
     ];
     for (const [s, r] of viewReplacements) {
-      if (c.includes(s)) {
-        c = c.split(s).join(r);
-        count++;
-      }
+      if (c.includes(s)) { c = c.split(s).join(r); count++; }
     }
 
     // --- 3l. 帮助菜单子项 ---
@@ -248,7 +322,7 @@ async function main() {
     log(`✅ ${mainFile}: ${count} 处修改已应用`);
   }
 
-  // ====== Step 4: 修改 src-VjjkG3q_.js (命令菜单 title) ======
+  // ====== Step 4: 修改 src-VjjkG3q_.js ======
   step(4, '修改命令菜单翻译 (src-VjjkG3q_.js)');
   const srcPath = path.join(buildDir, 'src-VjjkG3q_.js');
   if (fs.existsSync(srcPath)) {
@@ -287,7 +361,7 @@ async function main() {
       ['menuTitle:`Toggle Automations`', 'menuTitle:`切换自动化`'],
       ['menuTitle:`Copy Path of File`', 'menuTitle:`复制文件路径`'],
       ['menuTitle:`Copy Relative Path`', 'menuTitle:`复制相对路径`'],
-      ['menuTitle:`Reveal in Finder`', 'menuTitle:`在 Finder 中显示`'],
+      ['menuTitle:`Reveal in Finder`', IS_MAC ? 'menuTitle:`在 Finder 中显示`' : 'menuTitle:`在资源管理器中显示`'],
       ['menuTitle:`Open in Terminal`', 'menuTitle:`在终端中打开`'],
       ['menuTitle:`Search Symbol`', 'menuTitle:`搜索符号`'],
       ['menuTitle:`Command Palette`', 'menuTitle:`命令面板`'],
@@ -305,7 +379,7 @@ async function main() {
     writeFile(srcPath, s);
     log(`✅ src-VjjkG3q_.js: ${srcCount} 处修改已应用`);
   } else {
-    log(`⚠️ 找不到 src-VjjkG3q_.js，跳过`);
+    log(`⚠️  找不到 src-VjjkG3q_.js，跳过`);
   }
 
   // ====== Step 5: 修改 Preload 层 ======
@@ -330,10 +404,8 @@ async function main() {
     const p = path.join(buildDir, wf);
     let wc = readFile(p);
     const before = wc;
-    // 开启 enable_i18n (多种写法都处理)
     wc = wc.replace(/enable_i18n:\s*!\s*1/g, 'enable_i18n:!0');
     wc = wc.replace(/enable_i18n:\s*false/g, 'enable_i18n:true');
-    // 设置 defaultLocale
     wc = wc.replace(/defaultLocale:"en"/g, 'defaultLocale:"zh-CN"');
     wc = wc.replace(/defaultLocale:"en-US"/g, 'defaultLocale:"zh-CN"');
     if (wc !== before) {
@@ -393,15 +465,18 @@ async function main() {
   log('✅ 打包完成');
 
   log('\n📦 部署: 移除签名并替换 app.asar...');
-  run(`codesign --remove-signature "${codexAppPath}"`, { allowFail: true });
+  removeSignature(codexAppPath);
   fs.copyFileSync(newAsar, asarPath);
   log('✅ app.asar 已替换');
 
-  log('\n🔏 重新签名 Codex.app...');
-  run(`codesign --force --deep --sign - "${codexAppPath}"`, { allowFail: true });
+  reSign(codexAppPath);
 
   log('\n✅ ✅ ✅ 中文语言包安装完成！');
-  log('请完全退出 Codex Desktop (Cmd+Q)，然后重新打开。');
+  if (IS_MAC) {
+    log('请完全退出 Codex Desktop (Cmd+Q)，然后重新打开。');
+  } else if (IS_WIN) {
+    log('请完全退出 Codex Desktop，然后重新打开。');
+  }
   log(`备份文件位于: ${backupPath}`);
 }
 
@@ -410,8 +485,13 @@ main().catch(e => {
   log(e.message);
   log('');
   log('💡 排查建议：');
-  log('  1. 确认 Codex Desktop 已完全退出 (Cmd+Q)');
-  log('  2. 确认有 /Applications/Codex.app 的写入权限');
-  log('  3. 尝试用 sudo 运行: sudo node install.js');
+  log('  1. 确认 Codex Desktop 已完全退出');
+  if (IS_WIN) {
+    log('  2. Windows: 请右键「命令提示符」→「以管理员身份运行」，然后重新执行');
+    log('     或：执行 install.bat（右键 → 以管理员身份运行）');
+  } else {
+    log('  2. macOS: 确认有 /Applications/Codex.app 的写入权限');
+    log('  3. 尝试用 sudo 运行: sudo node install.js');
+  }
   process.exit(1);
 });
