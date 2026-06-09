@@ -162,10 +162,10 @@ const srcOrigin = srcContent;
 const menuTitleMap = {
   'New Chat': '新建聊天',
   'Quick Chat': '快速聊天',
-  'Open Folder\u2026': '打开文件夹\u2026',
-  'Open Workspace\u2026': '打开工作区\u2026',
-  'Settings\u2026': '设置\u2026',
-  'Search Chats\u2026': '搜索聊天\u2026',
+  'Open Folder…': '打开文件夹…',
+  'Open Workspace…': '打开工作区…',
+  'Settings…': '设置…',
+  'Search Chats…': '搜索聊天…',
   'Toggle Sidebar': '切换侧边栏',
   'New Window': '新建窗口',
   'Select Next Chat': '选择下一个聊天',
@@ -201,7 +201,6 @@ const menuTitleMap = {
 
 let replaceCount = 0;
 for (const [en, zh] of Object.entries(menuTitleMap)) {
-  // 使用字符串替换，避免 RegExp 反引号转义问题
   const before = srcContent;
   const target = 'menuTitle:\\`' + en + '\\`';
   const replacement = 'menuTitle:\\`' + zh + '\\`';
@@ -235,20 +234,20 @@ for (const pf of preloadFiles) {
 }
 console.log('✅ Preload 层修改完成');
 
-// Step 6: 修改 WebView 层 (最关键：enable_i18n + app-intl-signal)
+// Step 6: 修改 WebView 层（最关键：enable_i18n + app-intl-signal）
 step(6, '修改 WebView 层 (enable_i18n + locale + 翻译)');
 const webviewAssets = path.join(EXTRACT_DIR, 'webview/assets');
 if (!fs.existsSync(webviewAssets)) {
   console.log('⚠️  找不到 webview/assets，跳过 WebView 层修改');
 } else {
   const wvFiles = fs.readdirSync(webviewAssets).filter(f => f.endsWith('.js'));
-
+  
   // 6.1 启用 enable_i18n（关键！）
   for (const wf of wvFiles) {
     const p = path.join(webviewAssets, wf);
     let c = readFile(p);
     // app-main-*.js 里: a?.get(`enable_i18n`,!1) → !0
-    c = c.replace(/\x60enable_i18n\x60,!1/g, '\x60enable_i18n\x60,!0');
+    c = c.replace(/\x60enable_i18n\x60,!1/g, '`enable_i18n`,!0');
     // locale 强制 zh-CN
     c = c.replace(/locale:\s*"en"/g, 'locale:"zh-CN"');
     c = c.replace(/var t="en-US"/g, 'var t="zh-CN"');
@@ -257,26 +256,55 @@ if (!fs.existsSync(webviewAssets)) {
     writeFile(p, c);
   }
   console.log('✅ enable_i18n 已启用，locale 已设置为 zh-CN');
-
+  
   // 6.2 修复 app-intl-signal（内联中文翻译，避免 import 错误）
   const zhCNFile = fs.readdirSync(webviewAssets).find(f => f.startsWith('zh-CN-') && f.endsWith('.js'));
   const signalFile = fs.readdirSync(webviewAssets).find(f => f.startsWith('app-intl-signal-') && f.endsWith('.js'));
-
+  
   if (zhCNFile && signalFile) {
     console.log(`  📦 找到中文翻译包: ${zhCNFile}`);
     console.log(`  🔧 修复: ${signalFile}`);
-
-    // 提取中文翻译对象
+    
+    // 提取中文翻译对象（用括号计数，不用正则）
     const zhContent = readFile(path.join(webviewAssets, zhCNFile));
-    const match = zhContent.match(/,\s*t=(\{[\s\S]*\});/);
-    if (match) {
-      const zhObj = match[1];
-      console.log(`  📦 翻译对象大小: ${(zhObj.length / 1024).toFixed(1)} KB`);
-
-      // 写入修复后的 app-intl-signal（内联翻译，不 import）
-      const fixedSignal = 'import{W as e,h as t}from"./vscode-api-DjORcpSo.js";import{s as n}from"./lib-MoKmYgcO.js";var r=e(t,n({locale:\\`zh-CN\\`,messages:' + zhObj + '}));export{r as t};';
-      writeFile(path.join(webviewAssets, signalFile), fixedSignal);
-      console.log(`  ✅ ${signalFile} 已修复（内联中文翻译）`);
+    
+    // 找到 "var e=...,t={"key":"value",...};" 中的 t={...} 部分
+    // 用括号计数精确提取
+    let tStart = -1;
+    let braceCount = 0;
+    let inT = false;
+    
+    // 先找到 ",t=" 的位置
+    const tAssignIdx = zhContent.indexOf(',t=');
+    if (tAssignIdx !== -1) {
+      tStart = tAssignIdx + 3; // 跳过 ",t="
+      
+      // 从 tStart 开始，用括号计数找到匹配的结束括号
+      braceCount = 0;
+      let i = tStart;
+      while (i < zhContent.length) {
+        const ch = zhContent[i];
+        if (ch === '{') braceCount++;
+        if (ch === '}') {
+          braceCount--;
+          if (braceCount === 0) {
+            // 找到了结束位置
+            const zhObj = zhContent.substring(tStart, i + 1);
+            console.log(`  📦 翻译对象大小: ${(zhObj.length / 1024).toFixed(1)} KB`);
+            
+            // 写入修复后的 app-intl-signal（内联翻译，用字符串拼接避免模板字符串问题）
+            const vsCodeImport = 'import{W as e,h as t}from"./vscode-api-DjORcpSo.js";';
+            const libImport = 'import{s as n}from"./lib-MoKmYgcO.js";';
+            const intlCall = 'var r=e(t,n({locale:"zh-CN",messages:';
+            const exportStmt = '}));export{r as t};';
+            const fixedSignal = vsCodeImport + libImport + intlCall + zhObj + exportStmt;
+            writeFile(path.join(webviewAssets, signalFile), fixedSignal);
+            console.log(`  ✅ ${signalFile} 已修复（内联中文翻译）`);
+            break;
+          }
+        }
+        i++;
+      }
     } else {
       console.log(`  ⚠️  无法提取翻译对象，跳过 app-intl-signal 修复`);
     }
