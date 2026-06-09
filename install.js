@@ -399,19 +399,36 @@ async function main() {
 
   // ====== Step 6: 修改 WebView 层 ======
   step(6, '修改 WebView 层 (enable_i18n + locale)');
-  const webviewFiles = fs.readdirSync(buildDir).filter(f => f.startsWith('app-main-') && f.endsWith('.js'));
-  for (const wf of webviewFiles) {
-    const p = path.join(buildDir, wf);
-    let wc = readFile(p);
-    const before = wc;
-    wc = wc.replace(/enable_i18n:\s*!\s*1/g, 'enable_i18n:!0');
-    wc = wc.replace(/enable_i18n:\s*false/g, 'enable_i18n:true');
-    wc = wc.replace(/defaultLocale:"en"/g, 'defaultLocale:"zh-CN"');
-    wc = wc.replace(/defaultLocale:"en-US"/g, 'defaultLocale:"zh-CN"');
-    if (wc !== before) {
-      writeFile(p, wc);
-      log(`✅ ${wf}: i18n 已开启, locale 已设置为 zh-CN`);
+  const webviewDir = path.join(extractDir, 'webview/assets');
+  if (!fs.existsSync(webviewDir)) {
+    log('⚠️  找不到 webview/assets 目录，跳过 WebView 层修改');
+  } else {
+    const webviewFiles = fs.readdirSync(webviewDir).filter(f => f.endsWith('.js'));
+    for (const wf of webviewFiles) {
+      const p = path.join(webviewDir, wf);
+      let wc = readFile(p);
+      const before = wc;
+
+      // 6a. 启用 enable_i18n（关键！）
+      // app-main-*.js 里: a?.get(`enable_i18n`,!1) → !0
+      // general-settings-*.js 里已经是 !0，不用改
+      wc = wc.replace(/\x60enable_i18n\x60,!1/g, '`enable_i18n`,!0');
+
+      // 6b. locale 强制 zh-CN
+      wc = wc.replace(/locale:\s*"en"/g, 'locale:"zh-CN"');
+      wc = wc.replace(/var t="en-US"/g, 'var t="zh-CN"');
+      wc = wc.replace(/<html lang="en">/g, '<html lang="zh-CN">');
+
+      // 6c. defaultLocale 回退
+      wc = wc.replace(/defaultLocale:\s*"en"/g, 'defaultLocale:"zh-CN"');
+      wc = wc.replace(/defaultLocale:\s*"en-US"/g, 'defaultLocale:"zh-CN"');
+
+      if (wc !== before) {
+        writeFile(p, wc);
+        log(`  ✅ ${wf}: 已修改`);
+      }
     }
+    log('✅ WebView 层: i18n 已启用, locale 已设置为 zh-CN');
   }
 
   // ====== Step 7: 更新 zh-CN.json ======
